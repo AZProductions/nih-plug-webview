@@ -1,5 +1,9 @@
 use baseview::{Event, Size, Window, WindowHandle, WindowOpenOptions, WindowScalePolicy};
-use nih_plug::prelude::{Editor, GuiContext, ParamSetter};
+use nih_plug::{
+    editor::ParentWindowHandle,
+    prelude::{Editor, GuiContext, ParamSetter},
+};
+use raw_window_handle::{HasRawWindowHandle, RawWindowHandle, Win32WindowHandle};
 use serde_json::Value;
 use std::{
     borrow::Cow,
@@ -8,12 +12,31 @@ use std::{
         Arc,
     },
 };
+use windows::Win32::{
+    Foundation::COLORREF,
+    Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CAPTION_COLOR},
+};
 use wry::{
     http::{Request, Response},
     WebContext, WebView, WebViewBuilder,
 };
 
 use crossbeam::channel::{unbounded, Receiver};
+
+pub struct ParentWindowHandleAdapter(ParentWindowHandle);
+
+unsafe impl HasRawWindowHandle for ParentWindowHandleAdapter {
+    fn raw_window_handle(&self) -> RawWindowHandle {
+        match self.0 {
+            ParentWindowHandle::Win32Hwnd(hwnd) => {
+                let mut handle = Win32WindowHandle::empty();
+                handle.hwnd = hwnd;
+                RawWindowHandle::Win32(handle)
+            }
+            _ => panic!("Unsupported window handle type"),
+        }
+    }
+}
 
 pub use wry::http;
 
@@ -36,6 +59,7 @@ pub struct WebViewEditor {
     custom_protocol: Option<(String, Arc<CustomProtocolHandler>)>,
     developer_mode: bool,
     background_color: (u8, u8, u8, u8),
+    caption_color: u32,
 }
 
 pub enum HTMLSource {
@@ -57,6 +81,7 @@ impl WebViewEditor {
             keyboard_handler: Arc::new(|_| false),
             mouse_handler: Arc::new(|_| EventStatus::Ignored),
             custom_protocol: None,
+            caption_color: 0,
         }
     }
 
@@ -102,6 +127,11 @@ impl WebViewEditor {
         F: Fn(MouseEvent) -> EventStatus + Send + Sync + 'static,
     {
         self.mouse_handler = Arc::new(handler);
+        self
+    }
+
+    pub fn with_caption_color(mut self, color: u32) -> Self {
+        self.caption_color = color;
         self
     }
 }
@@ -198,6 +228,28 @@ impl Editor for WebViewEditor {
             },
             title: "Plug-in".to_owned(),
         };
+
+        #[cfg(target_os = "windows")]
+        {
+            if self.caption_color != 0 {
+                let hwnd: *mut std::ffi::c_void =
+                    match ParentWindowHandleAdapter(parent).raw_window_handle() {
+                        RawWindowHandle::Win32(handle) => handle.hwnd,
+                        _ => panic!("Unsupported window handle type"),
+                    };
+                unsafe {
+                    let _ = DwmSetWindowAttribute(
+                        std::mem::transmute::<
+                            *mut std::ffi::c_void,
+                            windows::Win32::Foundation::HWND,
+                        >(hwnd),
+                        DWMWA_CAPTION_COLOR,
+                        &COLORREF(self.caption_color) as *const _ as *const _,
+                        std::mem::size_of::<COLORREF>() as u32,
+                    );
+                }
+            }
+        }
 
         let width = self.width.clone();
         let height = self.height.clone();
